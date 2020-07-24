@@ -44,7 +44,8 @@ EXPORT Keras := MODULE
     # Function to initialize all the global variables and functions.  This should
     # only be called once.
     def initGlobals():
-      import tensorflow as tf
+      import tensorflow.compat.v1 as tf
+      tf.disable_v2_behavior()
       from tensorflow.keras import layers
       import numpy as np
       global nodeId, nNodes, maxSliceLen
@@ -265,7 +266,8 @@ EXPORT Keras := MODULE
   EXPORT STREAMED DATASET(kString) DefineModel(STREAMED DATASET(kString) mdef, UNSIGNED4 seqId)
                       := EMBED(Python: globalscope(globalScope), persist('query'), activity)
     import traceback as tb
-    import tensorflow as tf
+    import tensorflow.compat.v1 as tf
+    tf.disable_v2_behavior()
     from tensorflow.keras import layers
     global nextModId
     try:
@@ -326,7 +328,8 @@ EXPORT Keras := MODULE
                                               STRING cdef)
                       := EMBED(Python: globalscope(globalScope), persist('query'), activity)
     import traceback as tb
-    import tensorflow as tf
+    import tensorflow.compat.v1 as tf
+    tf.disable_v2_behavior()
     from tensorflow.keras import layers
     global nextModId
     try:
@@ -422,7 +425,8 @@ EXPORT Keras := MODULE
     */
   EXPORT STREAMED DATASET(kString) FromJSON(STREAMED DATASET(kString) ksjson, UNSIGNED4 seqId)
               := EMBED(Python: globalscope(globalScope), persist('query'), activity)
-    import tensorflow as tf
+    import tensorflow.compat.v1 as tf
+    tf.disable_v2_behavior()
     global nextModId
     # Should be only one record on each node
     try:
@@ -451,7 +455,8 @@ EXPORT Keras := MODULE
     */
   EXPORT STREAMED DATASET(kString) CompileMod(STREAMED DATASET(kString) compilestr, UNSIGNED4 seqId,
                 UNSIGNED modelid = 0) := EMBED(Python: globalscope(globalScope), persist('query'), activity)
-    import tensorflow as tf
+    import tensorflow.compat.v1 as tf
+    tf.disable_v2_behavior()
     # Restore the keras / tensorflow context for this model.
     tfSession = sesscache[modelid]
     mod = modcache[modelid]
@@ -474,7 +479,8 @@ EXPORT Keras := MODULE
   EXPORT STREAMED DATASET(t_Tensor) GetWeights(
                           STREAMED DATASET(kString) dummy, UNSIGNED4 seqId, UNSIGNED modelid = 0) :=
                             EMBED(Python: globalscope(globalScope), persist('query'), activity)
-    import tensorflow as tf
+    import tensorflow.compat.v1 as tf
+    tf.disable_v2_behavior()
     threadlock.acquire()
     try:
       # Restore the keras / tensorflow context for this model.
@@ -497,7 +503,8 @@ EXPORT Keras := MODULE
     */
   EXPORT STREAMED DATASET(kString) SetWeights(STREAMED DATASET(t_Tensor) tens, UNSIGNED4 seqId,
               UNSIGNED modelid = 0) := EMBED(Python: globalscope(globalScope), persist('query'), activity)
-    import tensorflow as tf
+    import tensorflow.compat.v1 as tf
+    tf.disable_v2_behavior()
     import traceback as tb
     # Restore the keras / tensorflow context for this model.
     tfSession = sesscache[modelid]
@@ -531,7 +538,8 @@ EXPORT Keras := MODULE
               UNSIGNED modelid = 0) :=
             EMBED(Python: globalscope(globalScope), persist('query'), activity)
     import traceback as tb
-    import tensorflow as tf
+    import tensorflow.compat.v1 as tf
+    tf.disable_v2_behavior()
     import numpy as np
     global currEpoch, batchCount, cumLoss
     try:
