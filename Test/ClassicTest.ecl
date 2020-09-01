@@ -21,11 +21,11 @@ TensData := Tensor.R4.TensData;
 RAND_MAX := POWER(2,32) -1;
 
 // Test parameters
-trainCount := 1000;
+trainCount := 100000;
 testCount := 1000;
 featureCount := 5;
-batchSize := 128;
-numEpochs := 5;
+batchSize := 256;
+numEpochs := 10;
 // END Test parameters
 
 // Prepare training data.
@@ -112,7 +112,7 @@ ldef := ['''layers.Dense(256, activation='tanh', input_shape=(5,))''',
 
 // compileDef defines the compile line to use for compiling the defined model.
 // Note that 'model.' is implied, and should not be included in the compile line.
-compileDef := '''compile(optimizer=tf.keras.optimizers.SGD(.05),
+compileDef := '''compile(optimizer=tf.keras.optimizers.SGD(.01),
               loss=tf.keras.losses.mean_squared_error,
               metrics=[tf.keras.metrics.mean_squared_error])
               ''';

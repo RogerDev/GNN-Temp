@@ -60,7 +60,7 @@ FuncLayerDef := GNN.Types.FuncLayerDef;
   * which can be either sparse or dense, for efficiency and scalability purposes.
   * <p>Tensors can be used to convey record-oriented information such as training data as well as block
   * oriented data like weights.  Both can be N-dimensional.  For record-oriented data, the first shape
-  * component is 0 (unspecified) indicating that it can hold an arbitrary set of records.
+  * component is set to 0 (unspecified) indicating that it can hold an arbitrary set of records.
   * <p>For models with multiple inputs or outputs, Tensor Lists are used (see Tensor.ecl for details),
   * with one Tensor per input or output.
   * <p>USE OF NumericField

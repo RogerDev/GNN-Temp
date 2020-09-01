@@ -812,6 +812,7 @@ EXPORT Tensor
                         SELF := compressIfNeeded(LEFT, LEFT.denseData)), LOCAL);
       RETURN out;
     END; // Add
+
     /**
       * @internal
       * Add 2 tensor slices.  This is for internal use only.

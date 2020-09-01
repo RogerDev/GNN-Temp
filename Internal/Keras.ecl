@@ -44,10 +44,14 @@ EXPORT Keras := MODULE
     # Function to initialize all the global variables and functions.  This should
     # only be called once.
     def initGlobals():
-      import tensorflow.compat.v1 as tf
-      tf.disable_v2_behavior()
+      try:
+        import tensorflow.compat.v1 as tf # V2.x
+        tf.disable_v2_behavior()
+      except:
+        import tensorflow as tf # V 1.x
       from tensorflow.keras import layers
       import numpy as np
+      import math
       global nodeId, nNodes, maxSliceLen
       # Initialize global variables
       #   Extract the initialization parameters from initdata
@@ -159,7 +163,7 @@ EXPORT Keras := MODULE
       # return one dataset record at a time.
       global Np2Tens
       # Returns a streamed dataset of t_Tensor
-      def _Np2Tens(a, wi=0, maxSliceOverride=0):
+      def _Np2Tens(a, wi=0, maxSliceOverride=0, isWeights = False):
         try:
           epsilon = .000000001
           origShape = list(a.shape)
@@ -173,6 +177,14 @@ EXPORT Keras := MODULE
             maxSliceSize = maxSliceOverride
           else:
             maxSliceSize = divmod(maxSliceLen, elemSize)[0]
+          if isWeights and nNodes > 1 and flatSize > nNodes:
+            # When we are synchronizing weights, we need to make sure
+            # that we create Tensor with at least 1 slice per node.
+            # This allows all nodes to participate equally in the
+            # aggregation of weight changes.  For other data, it
+            # is more efficient to return fewer slices.
+            altSliceSize = math.ceil(flatSize / nNodes)
+            maxSliceSize = min([maxSliceSize, altSliceSize])
           while indx < flatSize:
             remaining = flatSize - indx
             if remaining >= maxSliceSize:
@@ -205,9 +217,9 @@ EXPORT Keras := MODULE
 
       # Convert a list of numpy ndarrays into an ECL tensor dataset.  Uses wi's to
       # distinguish the multiple tensors in the same dataset.
-      def _NpList2Tens(alist):
+      def _NpList2Tens(alist, isWeights = False):
         for i in range(len(alist)):
-          for rec in Np2Tens(alist[i], i+1):
+          for rec in Np2Tens(alist[i], i+1, isWeights = isWeights):
             yield rec
       NpList2Tens = _NpList2Tens
       global Tens2NpList
@@ -266,8 +278,11 @@ EXPORT Keras := MODULE
   EXPORT STREAMED DATASET(kString) DefineModel(STREAMED DATASET(kString) mdef, UNSIGNED4 seqId)
                       := EMBED(Python: globalscope(globalScope), persist('query'), activity)
     import traceback as tb
-    import tensorflow.compat.v1 as tf
-    tf.disable_v2_behavior()
+    try:
+      import tensorflow.compat.v1 as tf # V2.x
+      tf.disable_v2_behavior()
+    except:
+      import tensorflow as tf # V 1.x
     from tensorflow.keras import layers
     global nextModId
     try:
@@ -328,8 +343,11 @@ EXPORT Keras := MODULE
                                               STRING cdef)
                       := EMBED(Python: globalscope(globalScope), persist('query'), activity)
     import traceback as tb
-    import tensorflow.compat.v1 as tf
-    tf.disable_v2_behavior()
+    try:
+      import tensorflow.compat.v1 as tf # V2.x
+      tf.disable_v2_behavior()
+    except:
+      import tensorflow as tf # V 1.x
     from tensorflow.keras import layers
     global nextModId
     try:
@@ -425,8 +443,11 @@ EXPORT Keras := MODULE
     */
   EXPORT STREAMED DATASET(kString) FromJSON(STREAMED DATASET(kString) ksjson, UNSIGNED4 seqId)
               := EMBED(Python: globalscope(globalScope), persist('query'), activity)
-    import tensorflow.compat.v1 as tf
-    tf.disable_v2_behavior()
+    try:
+      import tensorflow.compat.v1 as tf # V2.x
+      tf.disable_v2_behavior()
+    except:
+      import tensorflow as tf # V 1.x
     global nextModId
     # Should be only one record on each node
     try:
@@ -455,8 +476,11 @@ EXPORT Keras := MODULE
     */
   EXPORT STREAMED DATASET(kString) CompileMod(STREAMED DATASET(kString) compilestr, UNSIGNED4 seqId,
                 UNSIGNED modelid = 0) := EMBED(Python: globalscope(globalScope), persist('query'), activity)
-    import tensorflow.compat.v1 as tf
-    tf.disable_v2_behavior()
+    try:
+      import tensorflow.compat.v1 as tf # V2.x
+      tf.disable_v2_behavior()
+    except:
+      import tensorflow as tf # V 1.x
     # Restore the keras / tensorflow context for this model.
     tfSession = sesscache[modelid]
     mod = modcache[modelid]
@@ -479,8 +503,11 @@ EXPORT Keras := MODULE
   EXPORT STREAMED DATASET(t_Tensor) GetWeights(
                           STREAMED DATASET(kString) dummy, UNSIGNED4 seqId, UNSIGNED modelid = 0) :=
                             EMBED(Python: globalscope(globalScope), persist('query'), activity)
-    import tensorflow.compat.v1 as tf
-    tf.disable_v2_behavior()
+    try:
+      import tensorflow.compat.v1 as tf # V2.x
+      tf.disable_v2_behavior()
+    except:
+      import tensorflow as tf # V 1.x
     threadlock.acquire()
     try:
       # Restore the keras / tensorflow context for this model.
@@ -489,7 +516,7 @@ EXPORT Keras := MODULE
       with tfSession.as_default():
         with tfSession.graph.as_default():
           w = mod.get_weights()
-      return NpList2Tens(w)
+      return NpList2Tens(w, isWeights = True)
     except:
       # IF there was an error, return an empty dataset.
       assert 1 == 0, format_exc('GetWeights modelId = ' + str(modelid))
@@ -503,8 +530,11 @@ EXPORT Keras := MODULE
     */
   EXPORT STREAMED DATASET(kString) SetWeights(STREAMED DATASET(t_Tensor) tens, UNSIGNED4 seqId,
               UNSIGNED modelid = 0) := EMBED(Python: globalscope(globalScope), persist('query'), activity)
-    import tensorflow.compat.v1 as tf
-    tf.disable_v2_behavior()
+    try:
+      import tensorflow.compat.v1 as tf # V2.x
+      tf.disable_v2_behavior()
+    except:
+      import tensorflow as tf # V 1.x
     import traceback as tb
     # Restore the keras / tensorflow context for this model.
     tfSession = sesscache[modelid]
@@ -538,8 +568,11 @@ EXPORT Keras := MODULE
               UNSIGNED modelid = 0) :=
             EMBED(Python: globalscope(globalScope), persist('query'), activity)
     import traceback as tb
-    import tensorflow.compat.v1 as tf
-    tf.disable_v2_behavior()
+    try:
+      import tensorflow.compat.v1 as tf # V2.x
+      tf.disable_v2_behavior()
+    except:
+      import tensorflow as tf # V 1.x
     import numpy as np
     global currEpoch, batchCount, cumLoss
     try:
@@ -589,7 +622,7 @@ EXPORT Keras := MODULE
         for i in range(len(wA)):
           wA_changes.append(np.zeros_like(wA[i]))
       # Return the weight changes as a Tensor List.
-      return NpList2Tens(wA_changes)
+      return NpList2Tens(wA_changes, isWeights = True)
     except:
       # Error occurred, but no string returned.  So we do an assert to convey the error.
       assert 1 == 0, format_exc('FitBatch')
