@@ -39,7 +39,7 @@ EXPORT Keras := MODULE
     * use of STREAMED DATASETS in and out, ensure that this function will
     * be executed on every Thor slave node.
     */
-  EXPORT STREAMED DATASET(kString) Init(STREAMED DATASET(initParms) initdata) :=
+  EXPORT STREAMED DATASET(kString) Init(STREAMED DATASET(initParms) initdata, INTEGER numPhysicalComps) :=
               EMBED(Python: globalscope(globalScope), persist('query'), activity)
     # Function to initialize all the global variables and functions.  This should
     # only be called once.
@@ -58,6 +58,13 @@ EXPORT Keras := MODULE
       for rec in initdata:
         nodeId, nNodes, maxSliceLen = rec # Should only be one record
       #   Model cache indexed by model id.
+      import os
+      #this "CUDA VISIBLE DEVICES" will set which GPU a given Thor node will have access to
+      #without this, each single Thor will try and allocate memory on all GPUs, which will make it crash
+      if numPhysicalComps >= 0: os.environ["CUDA_VISIBLE_DEVICES"]=str(math.floor(int(nodeId)/numPhysicalComps))
+      else: os.environ["CUDA_VISIBLE_DEVICES"]="-1"
+      import tensorflow as tf
+      tf.reset_default_graph()
       global modcache
       modcache = {}
       #   Session cache indexed by model id.
@@ -574,6 +581,10 @@ EXPORT Keras := MODULE
     except:
       import tensorflow as tf # V 1.x
     import numpy as np
+    import uuid
+    import sys
+    #stdfileName = '/home/hpcc/pythonlogs/fitLogging' + str(uuid.uuid4()) + '.txt'
+    #myfile = open(stdfileName, 'w')
     global currEpoch, batchCount, cumLoss
     try:
       # Accumulate the loss for each epoch.
@@ -607,7 +618,7 @@ EXPORT Keras := MODULE
             # Set the starting weights
             mod.set_weights(wA)
             # Run one batch to fit the model
-            tfHistory = mod.fit(xAL, yAL, epochs=epoch, batch_size=32, initial_epoch=epoch-1, shuffle=False, steps_per_epoch = 1)
+            tfHistory = mod.fit(xAL, yAL, epochs=epoch, batch_size=miniBatch, initial_epoch=epoch-1, shuffle=True)
             # Update the cumulative (epoch) loss
             currLoss = tfHistory.history['loss'][-1]
             cumLoss[modelid] += currLoss
@@ -627,6 +638,83 @@ EXPORT Keras := MODULE
       # Error occurred, but no string returned.  So we do an assert to convey the error.
       assert 1 == 0, format_exc('FitBatch')
   ENDEMBED; // FitBatch
+	
+  EXPORT STREAMED DATASET(t_Tensor) FitBatchNCCL( //experimental
+              STREAMED DATASET(t_Tensor) weights,
+              STREAMED DATASET(t_Tensor) x,
+              STREAMED DATASET(t_Tensor) y,
+              UNSIGNED4 seqId,
+              UNSIGNED4 epoch,
+              UNSIGNED modelid = 0,
+							UNSIGNED4 miniBatch = 0) :=
+            EMBED(Python: globalscope(globalScope), persist('query'), activity)
+    import traceback as tb
+    import tensorflow as tf
+    import numpy as np
+    import uuid
+    import sys
+    #stdfileName = '/home/hpcc/pythonlogs/fitncclSTDOUT_' + str(uuid.uuid4()) + '.txt'
+    #sys.stdout = open(stdfileName, 'w')
+    #print('test')
+    global currEpoch, batchCount, cumLoss
+    try:
+      # Accumulate the loss for each epoch.
+      if epoch != currEpoch.get(modelid, 0):
+        batchCount[modelid] = 0
+        cumLoss[modelid] = 0.0
+        currEpoch[modelid] = epoch
+      # Process this batch.
+      batchCount[modelid] += 1
+      wA_changes = []
+      # Restore Keras / TF context
+      #mod = modcache[modelid]
+      # Convert the incoming weights to a list of numpy arrays
+      wA = Tens2NpList(weights)
+      # Convert the X tensor to a numpy array
+      xAL = Tens2NpList(x, recordOriented = True)
+      # Convert the Y tensor to a numpy array
+      yAL = Tens2NpList(y, recordOriented = True)
+      if xAL and yAL and xAL[0].size > 0 and yAL[0].size > 0:
+        # We've got some data
+        # Do some error checking.
+        for i in range(len(xAL)):
+          xA = xAL[i]
+          yA = yAL[i]
+          if xA.size == 0 or yA.size == 0 or xA.shape[0] != yA.shape[0]:
+            assert 1 == 0, 'FitNCCL: X and Y sizes do not match or are zero: xShape = ' + str(xA.shape) + ', yShape = ' + str(yA.shape)
+        # Restore the keras / tensorflow context for this model.
+        tfSession = sesscache[modelid]
+        with tfSession.as_default():
+          with tfSession.graph.as_default():
+            mirrored_strategy = tf.distribute.MirroredStrategy()
+            with mirrored_strategy.scope():
+              # Set the starting weights
+              #mod = modcache[modelid]
+              mod = tf.keras.Sequential([tf.keras.Input(shape=(28,28,1)),tf.keras.layers.Conv2D(64, kernel_size=(3, 3), activation="relu"),tf.keras.layers.MaxPooling2D(pool_size=(2, 2)),tf.keras.layers.Conv2D(128, kernel_size=(3, 3), activation="relu"),tf.keras.layers.MaxPooling2D(pool_size=(2, 2)),tf.keras.layers.Conv2D(2560, kernel_size=(3, 3), activation="relu"),tf.keras.layers.MaxPooling2D(pool_size=(2, 2)),tf.keras.layers.Dropout(0.25),tf.keras.layers.Flatten(),tf.keras.layers.Dense(10240, activation='relu'),tf.keras.layers.Dense(3850, activation='relu'),tf.keras.layers.Dropout(0.5),tf.keras.layers.Dense(10, activation="softmax"),])
+              mod.compile(loss='categorical_crossentropy', optimizer='adam', metrics=["accuracy"])              
+							#mod.set_weights(wA)
+              # Run one batch to fit the model
+              tfHistory = mod.fit(xAL, yAL, epochs=epoch, batch_size=miniBatch, initial_epoch=epoch-1)
+              # Update the cumulative (epoch) loss
+              #currLoss = tfHistory.history['loss'][-1]
+              #cumLoss[modelid] += currLoss
+              # Get the new weights from Keras model.
+              #wA_out = mod.get_weights()
+              wA_out = wA
+        # For each layer, subtract the new weights from the starting weights to compute
+        # the weight updates.
+        for i in range(len(wA)):
+          wA_changes.append(wA_out[i] - wA[i])
+      else:
+        # No X / Y data received.  Send null changes
+        for i in range(len(wA)):
+          wA_changes.append(np.zeros_like(wA[i]))
+      # Return the weight changes as a Tensor List.
+      return NpList2Tens(wA_changes)
+    except:
+      # Error occurred, but no string returned.  So we do an assert to convey the error.
+      assert 1 == 0, format_exc('FitBatchNCCL')
+  ENDEMBED; // FitBatchNCCL
   /**
     * Get the current epoch's accumulated average loss up to this point.
     */
@@ -677,6 +765,43 @@ EXPORT Keras := MODULE
       # Error occurred, but no string returned.  So we do an assert to convey the error.
       assert 1 == 0, format_exc('Evaluate')
   ENDEMBED;
+	
+	/**
+	*Evaluate the ROC/AUC of the model.
+	*/
+	EXPORT STREAMED DATASET(metrics) RocAucScore(
+              STREAMED DATASET(t_Tensor) x,
+              STREAMED DATASET(t_Tensor) y,
+              UNSIGNED4 seqId,
+              UNSIGNED modelid = 0) :=
+              EMBED(Python: globalscope(globalScope), persist('query'), activity)
+    try:
+      from sklearn.metrics import roc_auc_score
+      mod = modcache[modelid]
+      # Convert x data to a numpy array
+      xA = Tens2NpList(x, recordOriented = True)
+      # Convert y data to a numpy array
+      yA = Tens2NpList(y, recordOriented = True)
+      outRecs = []
+      # Restore the keras / tensorflow context for this model.
+      tfSession = sesscache[modelid]
+      with tfSession.as_default():
+        with tfSession.graph.as_default():
+          # Evaluate the Keras model
+          yPredictions = mod.predict(xA)
+          auc = roc_auc_score(yA[0], yPredictions) #returns a float type
+          outRecs.append((0,'AUC_ROC', float(auc)))
+          #outRecs.append((0,str(yPredictions.shape), float(1)))
+          #outRecs.append((1,str(xA[0].shape), float(1)))
+          #outRecs.append((2,str(yA[0].shape), float(1)))
+          #outRecs.append((4,str(auc), float(1)))
+      return outRecs
+    except:
+      # Error occurred, but no string returned.  So we do an assert to convey the error.
+      assert 1 == 0, format_exc('RocAucScore')
+  ENDEMBED;
+	
+	
   /**
     * Use the Keras model to predict the output for a set
     * of independent (x) data.

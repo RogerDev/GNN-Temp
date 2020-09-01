@@ -128,12 +128,12 @@ EXPORT GNNI := MODULE
     *
     * @return A session token (UNSIGNED4) to identify this session.
     */
-  EXPORT UNSIGNED4 GetSession() := FUNCTION
+  EXPORT UNSIGNED4 GetSession(INTEGER numPhysicalComps = -1) := FUNCTION
     initDat := DATASET(1, TRANSFORM(initParms,
                                       SELF.nodeId := nodeId,
                                       SELF.nNodes := nNodes,
                                       SELF.maxSliceSize := Tensor.MAX_SLICE), LOCAL);
-    kstatus := ASSERT(Keras.Init(initDat), LENGTH(text) = 0, 'GetSession Exception: ' + text, FAIL);
+    kstatus := ASSERT(Keras.Init(initDat, numPhysicalComps), LENGTH(text) = 0, 'GetSession Exception: ' + text, FAIL);
     status := reduceResults(kstatus);
     model := IF(LENGTH(status) = 0, getToken(0), 0);
     RETURN model;
@@ -424,8 +424,10 @@ EXPORT GNNI := MODULE
   EXPORT UNSIGNED4 Fit(UNSIGNED4 model,
                       DATASET(t_Tensor) x,
                       DATASET(t_Tensor) y,
-                      UNSIGNED4 batchSize = 100,
-                      UNSIGNED4 numEpochs = 1) := FUNCTION
+                      UNSIGNED4 batchSize = 100, //RK - now this should be the weight aggregate interval size.
+                      UNSIGNED4 numEpochs = 1,
+											UNSIGNED4 miniBatch = 32 //RK -  mini batch is the keras batch size. GNN batch should be larger than actual batch for performance reasons
+											) := FUNCTION
     kModelId := model DIV kerasIdFactor;
     // Get the initial weights to use
     initWts0 := GetWeights(model);
@@ -449,7 +451,9 @@ EXPORT GNNI := MODULE
         batchPos := (batchNum-1) * batchSize + 1;
         xBatch := int.TensExtract(xAl, batchPos, batchSize);
         yBatch := int.TensExtract(yAl, batchPos, batchSize);
-        wtChanges0 := IF(EXISTS(yBatch), Keras.FitBatch(wts2, xBatch, yBatch, obscure(model), epochNum, kModelId), DATASET([], t_Tensor));
+        wtChanges0 := IF(EXISTS(yBatch), Keras.FitBatch(wts2, xBatch, yBatch, obscure(model), epochNum, kModelId, miniBatch), DATASET([], t_Tensor));
+				rkLog := Syslog.addWorkunitInformation('RKLOG - Keras.FitBatch iteration: ' + batchNum + ', Epoch: ' + epochNum + ', OldBatchSize(): ' + (string)batchSize);
+				//rkLog := OUTPUT(xBatch);
         // Move all the changes for a given wi and slice to the same node.  Each
         // node has a set of wi/sliceIds to roll up.  Note that the original
         // weights are already replicated to all nodes.
@@ -462,7 +466,7 @@ EXPORT GNNI := MODULE
         batchLoss := IF(EXISTS(newWts), GetLoss(model + (batchesPerEpoch * (epochNum-1)) + batchNum), 1.0);
         logProgress2 := Syslog.addWorkunitInformation('Training Status (2): ModelId = ' +
                 kModelId + ', Epoch = ' + epochNum + ', Batch = ' + batchNum + ', Loss = ' + batchLoss);
-        RETURN newWts;
+        RETURN WHEN(newWts, rkLog);
       END;
       epochWts := LOOP(wts1, batchesPerEpoch, doBatch(ROWS(LEFT), COUNTER));
       epochLoss := IF(EXISTS(epochWts), GetLoss(model + (batchesPerEpoch * (epochNum-1))), 1.0);
@@ -474,6 +478,71 @@ EXPORT GNNI := MODULE
     finalWts := LOOP(initWts, numEpochs, doEpoch(ROWS(LEFT), COUNTER));
     RETURN IF(EXISTS(finalWts), getToken(model + numEpochs * numEpochs), 0);
   END; // Fit
+	
+	//RK - this NCCL Fit function is a modification of the FIT above. It is to be used with the coresponding GNN.keras changes too
+	// this will allow for data parallelism accross mutliple GPUs and use NCCL (direct GPU communication) to aggregate weights
+	// Only applicable when with an NVIDIA GPU count >=2 
+	// Use ECL to aggregate weights every epoch and NCCL to aggregate weights more often between the two. Don't need to agregate weights
+	// via ECL if only using GPU nodes on one machine, the weight updates via NCCL will acomplish the same goal
+	// Thus, use batch size such that th
+	EXPORT UNSIGNED4 NCCLFit(UNSIGNED4 model,
+                      DATASET(t_Tensor) x,
+                      DATASET(t_Tensor) y,
+                      UNSIGNED4 batchSize = 100, //RK - now this should be the weight aggregate interval size.
+                      UNSIGNED4 numEpochs = 1,
+											UNSIGNED4 miniBatch = 32 //RK -  mini batch is the keras batch size. GNN batch should be larger than actual batch for performance reasons
+											) := FUNCTION
+    kModelId := model DIV kerasIdFactor;
+    // Get the initial weights to use
+    initWts0 := GetWeights(model);
+    // We get the weights from the first node and then copy them to all nodes
+    // so that everybody starts with the same weights
+    initWts := Tensor.R4.Replicate(initWts0);
+    // Align the X and Y tensor lists so that we will get the corresponding records on the same nodes
+    // for each input and output tensor.
+    maxInputWi := MAX(x, wi);
+    // Change the wi's for outputs (y) so that they are after the input wi's
+    y1 := PROJECT(y, TRANSFORM(RECORDOF(LEFT), SELF.wi := LEFT.wi + maxInputWi, SELF := LEFT), LOCAL);
+    aligned := Tensor.R4.AlignTensors(x + y1);
+    // Now change the Y's wi back to the original numbers
+    xAl := aligned(wi <= maxInputWi);
+    yAl := PROJECT(aligned(wi > maxInputWi), TRANSFORM(RECORDOF(LEFT), SELF.wi := LEFT.wi - maxInputWi, SELF := LEFT), LOCAL);
+    totalRecords := Tensor.R4.GetRecordCount(yAl);
+    batchesPerEpoch := ROUNDUP(totalRecords / nNodes / batchSize);
+    DATASET(t_Tensor) doEpoch(DATASET(t_Tensor) wts1, UNSIGNED epochNum) := FUNCTION
+      DATASET(t_Tensor) doBatch(DATASET(t_Tensor) wts2, UNSIGNED batchNum) := FUNCTION
+        // Train the model and Get the weight changes from each node
+        batchPos := (batchNum-1) * batchSize + 1;
+        xBatch := int.TensExtract(xAl, batchPos, batchSize);
+        yBatch := int.TensExtract(yAl, batchPos, batchSize);
+        wtChanges0 := IF(EXISTS(yBatch), Keras.FitBatchNCCL(wts2, xBatch, yBatch, obscure(model), epochNum, kModelId, miniBatch), DATASET([], t_Tensor));
+				rkLog := Syslog.addWorkunitInformation('RKLOG - Keras.FitBatch iteration: ' + batchNum + ', Epoch: ' + epochNum + ', OldBatchSize(Batch Size per Computational Node): ' + batchSize);
+        // Move all the changes for a given wi and slice to the same node.  Each
+        // node has a set of wi/sliceIds to roll up.  Note that the original
+        // weights are already replicated to all nodes.
+        wtChanges := DISTRIBUTE(wtChanges0, wi + sliceId);
+        // Sum up the original weights (de-replicated) and all changes for each wi and slice
+        newWts := rollUpdates(wts2((wi + sliceId) % nNodes = nodeId), wtChanges);
+        // Note: newWts have been replicated to all nodes by rollUpdates.
+        // We use obscure to prevent the ECL compiler from treating GetLoss as a
+        // constant
+        batchLoss := IF(EXISTS(newWts), GetLoss(model + (batchesPerEpoch * (epochNum-1)) + batchNum), 1.0);
+        logProgress2 := Syslog.addWorkunitInformation('Training Status (2): ModelId = ' +
+                kModelId + ', Epoch = ' + epochNum + ', Batch = ' + batchNum + ', Loss = ' + batchLoss);
+        RETURN WHEN(newWts, rkLog);
+      END;
+      epochWts := LOOP(wts1, batchesPerEpoch, doBatch(ROWS(LEFT), COUNTER));
+      epochLoss := IF(EXISTS(epochWts), GetLoss(model + (batchesPerEpoch * (epochNum-1))), 1.0);
+      //epochLoss := IF(EXISTS(epochWts), GetLoss(obscure(model)), 1.0);
+      logProgress := Syslog.addWorkunitInformation('Training Status: ModelId = ' +
+                      kModelId + ', Epoch = ' + epochNum + ', Loss = ' + epochLoss);
+      RETURN WHEN(epochWts, logProgress);
+    END;
+    finalWts := LOOP(initWts, numEpochs, doEpoch(ROWS(LEFT), COUNTER));
+    RETURN IF(EXISTS(finalWts), getToken(model + numEpochs * numEpochs), 0);
+  END; // NCCL FIT
+	
+	
   /**
     * Determine the loss and other metrics in order to evaluate
     * the model.
@@ -516,6 +585,36 @@ EXPORT GNNI := MODULE
                 SELF := LEFT), LOCAL);
     RETURN metrics;
   END;
+	
+	/**
+	* This produces an ROC/AUC score for measuring NN performance.
+	*/
+	
+	EXPORT DATASET(Types.metrics) RocAucScore(UNSIGNED4 model,
+                      DATASET(t_Tensor) x,
+                      DATASET(t_Tensor) y) := FUNCTION
+    kModelId := model DIV kerasIdFactor;
+    // Align the X and Y tensor lists so that we will get the corresponding records on the same nodes
+    // for each input and output tensor.
+    maxInputWi := MAX(x, wi);
+    // Change the wi's for outputs (y) so that they are after the input wi's
+    y1 := PROJECT(y, TRANSFORM(RECORDOF(LEFT), SELF.wi := LEFT.wi + maxInputWi, SELF := LEFT), LOCAL);
+    aligned := Tensor.R4.AlignTensors(x + y1);
+    // Now change the Y's wi back to the original number
+    xAl := aligned(wi <= maxInputWi);
+    yAl := PROJECT(aligned(wi > maxInputWi), TRANSFORM(RECORDOF(LEFT), SELF.wi := LEFT.wi - maxInputWi, SELF := LEFT), LOCAL);
+    m0 := Keras.RocAucScore(xAl, yAl, model, kModelId);
+    m1 := DISTRIBUTE(m0, metricId);
+    m2 := TABLE(m1,
+                {metricId, metricName, avgVal := AVE(GROUP, value)},
+                metricId, metricName, LOCAL);
+    metrics := PROJECT(m2, TRANSFORM(Types.metrics,
+                SELF.value := LEFT.avgVal,
+                SELF := LEFT), LOCAL);
+    RETURN metrics;
+  END;
+	
+	
   /**
     * Predict the results using the trained model.
     * <p>The X tensor represents the independent (input) data
